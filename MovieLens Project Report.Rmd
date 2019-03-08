@@ -1,0 +1,189 @@
+---
+title: "MovieLens Project Report"
+author: "Lee Hagendoorn"
+date: "March 7, 2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE, echo=FALSE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caret)
+library(lattice)
+library(purrr)
+```
+```{r load data for project here, echo=FALSE, warning = FALSE, message = FALSE}
+#Dataset build--------------------------------------------------------
+
+# Note: this process could take a couple of minutes
+
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+
+# MovieLens 10M dataset:
+# https://grouplens.org/datasets/movielens/10m/
+# http://files.grouplens.org/datasets/movielens/ml-10m.zip
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- read.table(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                      col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+
+set.seed(1)
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+
+validation <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+#end dataset build-------------------------------------------------------------------------
+
+```
+
+## Introduction
+
+The primary objective of this project is to create a movie recommendation algorithm to predict a movie rating a person would select based on existing data.  We utilized an existing data set of movie ratings created by a research lab at the University of Minnesota called GroupLens that compiled more than 10 million movie ratings.  The data was utilized to generate machine learning algorithms to best predict a person's rating for a movie.  To rate the project as a success, we must create an algorithm that could predict at an accurate enough level to produce a Residual Mean Square Error (RMSE) of less than or equal to 0.87750.
+
+## Analysis
+
+The data set used for this project was the MovieLens database created by GroupLens, a research lab in the Department of Computer Science and Engineering at the University of Minnesota.  The database includes 10 million ratings for more than 10 thousand movies and 72 thousand users.  Ratings are calculated in ½ star increments from 0 to 5 stars.
+
+The task of the recommendation algorithm is to fill in the values for each movie that a user has not rated.
+
+Initially we created a training data set to be used to create our rating prediction algorithm and a test data set that will be used to determine how well our algorithm predicts ratings in this data set.  The training set included 90% of the data, with the remaining 10% in the test set.  We only kept movies and users in the test set that were also in the training set.
+
+The training data set includes 9,000,055 rows in which each row represents a rating given by one user to one movie.  Within this dataset there are 10,677 distinct movies rated and 69,878 users.  If each user rated all movies, we would have 746,087,406 rows in the data set.  However, we only have roughly 9 million rows in our training set, which indicates not all users rated every movie.  
+
+The test data set included 999,999 ratings, 9,809 distinct movies rated and 68,534 users.
+
+We could think of the data sets as very large matrices with users on the rows and movies on the columns with many empty cells.  The chart below shows a matrix with a random sample of 100 users and 100 movies from the training data set.  The orange spaces show the movies that were rated by each user.  You can see that most users only have only rated a small subset of movies.
+```{r image of random 100x100 matrix of users and movies with rating y/n as the cells, echo=FALSE}
+users <- sample(unique(edx$userId), 100)
+
+edx %>% filter(userId %in% users) %>% 
+  select(userId, movieId, rating) %>%
+  mutate(rating = 1) %>%
+  spread(movieId, rating) %>% select(sample(ncol(.), 100)) %>% 
+  as.matrix() %>% t(.) %>%
+  image(1:100, 1:100,. , xlab="Movies", ylab="Users")
+abline(h=0:100+0.5, v=0:100+0.5, col = "grey")
+
+```
+You can see in the following chart that some movies get rated much more than others.  There is somewhat of bell-shaped curve showing an approximately normal distribution of the number of ratings per movie. 
+```{r movie rating distribution, echo=FALSE}
+edx %>% 
+  dplyr::count(movieId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Movies")
+```
+Below is a table of movies that have received the most ratings.  You may notice many of these are well-known, blockbuster-type movies.  You can also see that some of the movies with the fewest ratings are those with less popular names.
+
+```{r top 10 movies based on ratings count, echo=FALSE}
+edx %>% 
+  group_by(title) %>% 
+  summarize(n=n()) %>% 
+  arrange(desc(n)) %>% 
+  slice(1:10) %>%
+  knitr::kable()
+```
+
+```{r bottom 10 movies based on rating count, echo=FALSE}
+edx %>% 
+  group_by(title) %>% 
+  summarize(n=n()) %>% 
+  arrange(n) %>%
+  slice(1:10) %>%
+  knitr::kable()
+```
+
+Also, the number of ratings per user can vary significantly.  Some users rate movies much more than others as indicated on the chart below.
+
+```{r user ratings distribution, echo=FALSE}
+edx %>% 
+  dplyr::count(userId) %>% 
+  ggplot(aes(n)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  scale_x_log10() + 
+  ggtitle("Users")
+```
+
+To measure our prediction results, we developed a loss, RMSE, function to see how close our prediction models are to predicting the results in our test data set.  The RMSE function looks at the difference between the actual star rating in the test data set and our prediction for that star rating.  An RMSE>1 would indicate our predictions were not very good as they would be more than 1 star away of the actual rating.  Thus, our goal was to achieve an RMSE <= 0.87750 stars away from the actual star rating.
+
+## Results
+
+For the first machine learning algorithm, we decided to use the same predictions for all ratings with the differences explained by random variation.  Thus, the average rating was taken for the entire training set, which was 3.512 stars, and used to predict the ratings within the test data set.  The formula is y_i_u = mu + e_i_u, where mu is the average star rating and e_i_u is the error for movie i and user u.  Computing the RMSE using this model on the test data set resulted in an RMSE of 1.06.  This is still far from our goal.  However, if you plug in any other single, random, number as the predicted rating, the RSME was even higher.  For example, plugging in 4 as the prediction for every rating, we get an RMSE of 1.17.
+
+For our next model approach, we looked at the movie effect on ratings.  You can see in the chart below that movies have varied average ratings.
+
+```{r mean rating by movie, echo=FALSE}
+edx %>% group_by(movieId) %>% 
+  summarize(avg=mean(rating)) %>%
+  ggplot(aes(avg)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  xlab("Average movie rating") +
+  ylab("Movie count")
+```
+
+So, we now add a term to our model that represents the average rating for a movie, b_i.  The new model is y_i_u = mu + b_i + e_i_u.  The estimates for b_i differ substantially as some movies are seen, in general, better than others accross users as you can see in the chart below.
+
+```{r plot of b_i estimates, echo=FALSE}
+#calculating the average for the whole training set
+mu <- mean(edx$rating)
+
+#calculating the movie effect by removing mu from the rating
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_i=mean(rating-mu))
+
+#looking at the b_i estimates
+movie_avgs %>% 
+  qplot(b_i, geom ="histogram", bins = 10, data = ., color = I("black"))
+```
+
+When we test our new model that includes the movie effect, the RMSE drops to 0.944395. 
+
+Now we look to improve our model by looking closer at users and their individual effect on the ratings.  We see that some users rate differently on average than others.  You can see the variation in average ratings by users within the chart below.
+
+```{r mean rating by user, echo=FALSE}
+edx %>% group_by(userId) %>% 
+  summarize(avg=mean(rating)) %>%
+  ggplot(aes(avg)) + 
+  geom_histogram(bins = 30, color = "black") + 
+  xlab("Average movie rating") +
+  ylab("User count")
+```
+
+Thus, a user-specific effect, b_u, was added to the model. Our new model is y_i_u = mu + b_i + b_u + e_i_u. The results of including a movie and user effect yields an RMSE of 0.86535, which is a nice improvement and meets our goal of an RMSE <= 0.87750.
+
+We then investigated if we could produce an even better model by digging deeper into the movie effect.  When reviewing we found that the movies in which we saw the biggest error in rating prediction had very few user's rate the movie.  Thus, we applied regularization to the model in which we shrunk our movie effect towards zero, if the number of user ratings for the movie was low.  We used cross-validation to determine the optimal value used to shrink the movie effect, lambda, which was 2.5 and produced an RMSE of 0.94389.  This is slightly better than the non-regularized movie effect model, but not as good as the model in which the movie and user effects were both taken into account.
+
+Next, we decided to use regularization on the user effect as well to shrink the effect towards zero if a user had not rated many movies.  Using cross-validation to find an optimal lambda for both the movie and user effects, we found the best lambda to be 5.25, which produced an RMSE of 0.86481.  This result only slightly improves the original, unregularized, movie and user effect model by 0.00054.
+
+Note we also looked at a model with genre and user effects, but this did not yield better results than our movie and user effect model at 0.94021.
+
+## Conclusion
+
+Overall, we can produce a model that meets our objective to produce an RMSE of <= 0.87750 by including both movie and user effects.  If we adjust the model to penalize estimates for a low number of ratings for a movie as well as a low number of ratings completed by a user, we can make the model even better.
